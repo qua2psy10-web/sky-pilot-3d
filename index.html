@@ -150,7 +150,6 @@
 
 <script type="module">
 import * as THREE from 'three';
-window.__threeLoaded = true;
 
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
@@ -158,6 +157,7 @@ const clamp = (v,a,b) => v<a?a:v>b?b:v;
 const rand  = (a,b) => a + Math.random()*(b-a);
 const rad   = d => d*Math.PI/180;
 const norm360 = d => ((d%360)+360)%360;
+const TAU   = Math.PI * 2;
 
 /* ================= renderer / scene ================= */
 const gameEl = $('#game');
@@ -1050,6 +1050,7 @@ function loop(now){
   renderer.render(scene, camera);
 }
 requestAnimationFrame(loop);
+window.__threeLoaded = true;   // set last: lets the fallback warn on any module-load failure
 </script>
 
 <script>
@@ -1062,7 +1063,7 @@ setTimeout(function(){
     var card = document.querySelector('.ov-card');
     if (card) card.appendChild(el);
   }
-}, 8000);
+}, 15000);
 </script>
 </body>
 </html>
