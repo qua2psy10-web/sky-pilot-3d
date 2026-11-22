@@ -986,6 +986,11 @@ function startGame(){
   hideOverlay();
   toast('GO!', 900);
 }
+/* bind the initial static menu button (the same markup ships in the HTML) */
+{
+  const initialBtn = document.getElementById('ovBtn');
+  if (initialBtn) initialBtn.addEventListener('click', startGame);
+}
 function togglePause(){
   if (!started) return;
   paused = !paused;
