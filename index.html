@@ -160,7 +160,7 @@ const rand  = (a,b) => a + Math.random()*(b-a);
 const rad   = d => d*Math.PI/180;
 const norm360 = d => ((d%360)+360)%360;
 const TAU   = Math.PI * 2;
-const VERSION = 6;   // bump on each deploy — shown in #tel to verify which build is running
+const VERSION = 7;   // bump on each deploy — shown in #tel to verify which build is running
 
 /* ================= renderer / scene ================= */
 const gameEl = $('#game');
@@ -576,87 +576,116 @@ function mergedInput(){
   };
 }
 
-/* ================= audio ================= */
+/* ================= audio =================
+   * Defensive: iOS WebAudio can fail in weird ways (partial init, suspended
+   * contexts, backgrounding kills). Every path must degrade gracefully and
+   * NEVER throw into the render loop.
+   */
 const AudioSys = {
-  ctx:null, master:null, propGain:null, noiseGain:null, osc1:null, osc2:null, filter:null, muted:false,
+  ctx:null, master:null, propGain:null, noiseGain:null, osc1:null, osc2:null, filter:null, muted:false, ready:false,
+  teardown(){
+    try { if (this.ctx) this.ctx.close(); } catch(e) {}
+    this.ctx = this.master = this.propGain = this.noiseGain = this.osc1 = this.osc2 = this.filter = null;
+    this.ready = false;
+  },
   init(){
     if (this.ctx) return;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
-    const ctx = this.ctx = new AC();
-    this.master = ctx.createGain(); this.master.gain.value = 0.6; this.master.connect(ctx.destination);
-    this.osc1 = ctx.createOscillator(); this.osc1.type = 'sawtooth'; this.osc1.frequency.value = 60;
-    this.osc2 = ctx.createOscillator(); this.osc2.type = 'triangle'; this.osc2.frequency.value = 180;
-    this.filter = ctx.createBiquadFilter(); this.filter.type = 'lowpass'; this.filter.frequency.value = 600;
-    this.propGain = ctx.createGain(); this.propGain.gain.value = 0;
-    this.osc1.connect(this.filter); this.osc2.connect(this.filter);
-    this.filter.connect(this.propGain); this.propGain.connect(this.master);
-    this.osc1.start(); this.osc2.start();
-    // wind noise
-    const len = ctx.sampleRate * 1;
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
-    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
-    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q = 0.6;
-    this.noiseGain = ctx.createGain(); this.noiseGain.gain.value = 0;
-    src.connect(bp); bp.connect(this.noiseGain); this.noiseGain.connect(this.master);
-    src.start();
+    let ctx;
+    try { ctx = new AC(); } catch(e) { return; }
+    this.ctx = ctx;
+    try { if (ctx.state === 'suspended') ctx.resume(); } catch(e) {}
+    // propeller chain (required)
+    try {
+      this.master = ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.6; this.master.connect(ctx.destination);
+      this.osc1 = ctx.createOscillator(); this.osc1.type = 'sawtooth'; this.osc1.frequency.value = 60;
+      this.osc2 = ctx.createOscillator(); this.osc2.type = 'triangle'; this.osc2.frequency.value = 180;
+      this.filter = ctx.createBiquadFilter(); this.filter.type = 'lowpass'; this.filter.frequency.value = 600;
+      this.propGain = ctx.createGain(); this.propGain.gain.value = 0;
+      this.osc1.connect(this.filter); this.osc2.connect(this.filter);
+      this.filter.connect(this.propGain); this.propGain.connect(this.master);
+      this.osc1.start(); this.osc2.start();
+    } catch(e) { this.teardown(); return; }
+    // wind noise (optional: on failure just no wind)
+    try {
+      const rate = (ctx.sampleRate > 0) ? ctx.sampleRate : 44100;
+      const buf = ctx.createBuffer(1, Math.max(1, Math.floor(rate)), rate);
+      const d = buf.getChannelData(0);
+      for(let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
+      const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+      const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q = 0.6;
+      this.noiseGain = ctx.createGain(); this.noiseGain.gain.value = 0;
+      src.connect(bp); bp.connect(this.noiseGain); this.noiseGain.connect(this.master);
+      src.start();
+    } catch(e) { this.noiseGain = null; }
+    this.ready = !!(this.ctx && this.master && this.osc1 && this.osc2 && this.filter && this.propGain);
+    if (!this.ready) this.teardown();
   },
-  resume(){ if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  resume(){ if (this.ctx && this.ctx.state === 'suspended') { try { this.ctx.resume(); } catch(e) {} } },
   setProp(throttle, running){
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    const on = running ? 1 : 0;
-    const f = 55 + throttle * 130;
-    this.osc1.frequency.setTargetAtTime(f, t, 0.06);
-    this.osc2.frequency.setTargetAtTime(f * 2.7, t, 0.06);
-    this.filter.frequency.setTargetAtTime(400 + throttle * 1100, t, 0.08);
-    this.propGain.gain.setTargetAtTime(on * (0.03 + throttle * 0.11), t, 0.05);
-    this.noiseGain.gain.setTargetAtTime(on * (0.015 + throttle * 0.05), t, 0.08);
-    this.master.gain.setTargetAtTime(this.muted ? 0 : 0.6, t, 0.05);
+    if (!this.ctx || !this.ready) return;
+    try {
+      const t = this.ctx.currentTime;
+      const on = running ? 1 : 0;
+      const f = 55 + throttle * 130;
+      this.osc1.frequency.setTargetAtTime(f, t, 0.06);
+      this.osc2.frequency.setTargetAtTime(f * 2.7, t, 0.06);
+      this.filter.frequency.setTargetAtTime(400 + throttle * 1100, t, 0.08);
+      this.propGain.gain.setTargetAtTime(on * (0.03 + throttle * 0.11), t, 0.05);
+      if (this.noiseGain) this.noiseGain.gain.setTargetAtTime(on * (0.015 + throttle * 0.05), t, 0.08);
+      this.master.gain.setTargetAtTime(this.muted ? 0 : 0.6, t, 0.05);
+    } catch(e) { this.ready = false; }   // context died (iOS backgrounding etc.) -> audio off, game continues
+  },
+  _sfx(fn){
+    if (!this.ctx || !this.master || this.muted) return;
+    try { fn(this.ctx, this.master); } catch(e) {}
   },
   thud(){
-    if (!this.ctx || this.muted) return;
-    const ctx = this.ctx, t = ctx.currentTime;
-    const len = ctx.sampleRate * 0.18;
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
-    const src = ctx.createBufferSource(); src.buffer = buf;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260;
-    const g = ctx.createGain(); g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
-    src.connect(lp); lp.connect(g); g.connect(this.master); src.start();
+    this._sfx((ctx, master) => {
+      const rate = (ctx.sampleRate > 0) ? ctx.sampleRate : 44100;
+      const t = ctx.currentTime;
+      const len = Math.max(1, Math.floor(rate * 0.18));
+      const buf = ctx.createBuffer(1, len, rate);
+      const d = buf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260;
+      const g = ctx.createGain(); g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+      src.connect(lp); lp.connect(g); g.connect(master); src.start();
+    });
   },
   ring(){
-    if (!this.ctx || this.muted) return;
-    const ctx = this.ctx;
-    [660, 990].forEach((f, i) => {
-      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
-      const g = ctx.createGain(); const t = ctx.currentTime + i * 0.09;
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
-      o.connect(g); g.connect(this.master);
-      o.start(t); o.stop(t + 0.25);
+    this._sfx((ctx, master) => {
+      [660, 990].forEach((f, i) => {
+        const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+        const g = ctx.createGain(); const t = ctx.currentTime + i * 0.09;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+        o.connect(g); g.connect(master);
+        o.start(t); o.stop(t + 0.25);
+      });
     });
   },
   crash(){
-    if (!this.ctx || this.muted) return;
-    const ctx = this.ctx, t = ctx.currentTime;
-    const o = ctx.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.7);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.75);
-    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.8);
-    const len = ctx.sampleRate * 0.5;
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
-    const src = ctx.createBufferSource(); src.buffer = buf;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
-    const g2 = ctx.createGain(); g2.gain.value = 0.5;
-    src.connect(lp); lp.connect(g2); g2.connect(this.master); src.start();
+    this._sfx((ctx, master) => {
+      const rate = (ctx.sampleRate > 0) ? ctx.sampleRate : 44100;
+      const t = ctx.currentTime;
+      const o = ctx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.7);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.35, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.75);
+      o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.8);
+      const len = Math.max(1, Math.floor(rate * 0.5));
+      const buf = ctx.createBuffer(1, len, rate);
+      const d = buf.getChannelData(0);
+      for(let i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
+      const g2 = ctx.createGain(); g2.gain.value = 0.5;
+      src.connect(lp); lp.connect(g2); g2.connect(master); src.start();
+    });
   }
 };
 $('#btnSound').addEventListener('click', () => toggleSound());
@@ -982,7 +1011,7 @@ function showOverlay(mode){
 function hideOverlay(){ overlay.classList.add('hidden'); }
 
 function startGame(){
-  AudioSys.init(); AudioSys.resume();
+  try { AudioSys.init(); AudioSys.resume(); } catch(e) {}
   started = true; paused = false;
   doReset(false);
   drone.battery = 100;
