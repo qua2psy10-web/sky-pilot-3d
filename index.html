@@ -41,6 +41,9 @@
   #land { color:#ffd76a; opacity:0; transition:opacity .3s; font-weight:700; }
   #land.on { opacity:1; }
 
+  #tel { position:absolute; top:calc(70px + env(safe-area-inset-top)); right:14px;
+    font:10px monospace; color:rgba(255,255,255,.5); text-align:right; pointer-events:none; }
+
   #combo { position:absolute; top:22%; left:50%; transform:translateX(-50%);
     font-size:26px; font-weight:800; color:#ffd76a; text-shadow:0 2px 8px rgba(0,0,0,.5);
     opacity:0; transition:opacity .4s; }
@@ -112,6 +115,7 @@
     <span>速度 <b id="spdVal">0</b> km/h</span><span class="sep">|</span>
     <span id="land">🅿 着陸</span>
   </div>
+  <div id="tel"></div>
   <div id="combo"></div>
   <div id="btnRow">
     <button id="btnCam">🎥 カメラ</button>
@@ -143,6 +147,7 @@
     <div class="ov-keys">キーボード：WASD/矢印＝姿勢　Q/E＝旋回　Space/Shift＝昇降<br>C＝カメラ切替　R＝リセット　H＝ホバー補助　M＝サウンド　P＝ポーズ</div>
   </div>
 </div>
+<div id="verstamp" style="position:fixed;left:10px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:20;color:rgba(255,255,255,.4);font:10px monospace">v?</div>
 
 <script type="module">
 /* relative import (no importmap needed) so the game also runs on older iOS Safari (< 16.4) */
@@ -155,6 +160,7 @@ const rand  = (a,b) => a + Math.random()*(b-a);
 const rad   = d => d*Math.PI/180;
 const norm360 = d => ((d%360)+360)%360;
 const TAU   = Math.PI * 2;
+const VERSION = 6;   // bump on each deploy — shown in #tel to verify which build is running
 
 /* ================= renderer / scene ================= */
 const gameEl = $('#game');
@@ -886,7 +892,7 @@ let menuAngle = 0;
 function updateCamera(dt, t){
   let kPos = 1 - Math.exp(-6*dt), kRot = 1 - Math.exp(-8*dt);
   if (!started){
-    menuAngle += dt * 0.06;
+    menuAngle += dt * 0.15;   // visible idle orbit
     _v2.set(Math.cos(menuAngle)*65, 26 + Math.sin(menuAngle*0.7)*5, Math.sin(menuAngle)*65);
     camPos.lerp(_v2, 1 - Math.exp(-2*dt));
     _tM.lookAt(camPos, _v2.set(0, 12, 0), _tUp);
@@ -1033,21 +1039,48 @@ function updateToast(){
 
 /* ================= main loop ================= */
 let last = performance.now();
+let frames = 0, fpsAccum = 0, fpsShown = 0, fatalShown = false;
+const telEl = $('#tel');
+function showFatal(e){
+  if (fatalShown) return;
+  fatalShown = true;
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:60;background:#5c1a1a;color:#fff;border:1px solid #ff9a9a;padding:8px 14px;border-radius:10px;font-size:12px;max-width:92vw;white-space:pre-wrap;text-align:left';
+  d.textContent = '⚠️ エラー: ' + (e && e.message ? e.message : String(e));
+  document.body.appendChild(d);
+}
+function updateTel(dt){
+  frames++;
+  fpsAccum += dt;
+  if (fpsAccum >= 0.5){
+    fpsShown = Math.round(0.5 / fpsAccum);
+    fpsAccum = 0;
+    if (telEl) telEl.textContent = `v${VERSION} fps:${fpsShown} f:${frames}`;
+  }
+}
 function loop(now){
   requestAnimationFrame(loop);
   let dt = clamp((now - last)/1000, 0.0001, 0.05);
   last = now;
   if (document.hidden) return;
-  if (started && !paused){ gt += dt; updateGame(dt); }
-  updateCamera(dt, gt);
-  updateVisuals(dt);
-  updateHUD(gt);
-  updateToast();
-  adaptQuality(dt);
-  renderer.render(scene, camera);
+  try {
+    if (started && !paused){ gt += dt; updateGame(dt); }
+    updateCamera(dt, gt);
+    updateVisuals(dt);
+    updateHUD(gt);
+    updateToast();
+    adaptQuality(dt);
+    renderer.render(scene, camera);
+    updateTel(dt);
+  } catch(e) { showFatal(e); }
 }
 requestAnimationFrame(loop);
 window.__threeLoaded = true;   // set last: lets the fallback warn on any module-load failure
+if (telEl) telEl.textContent = `v${VERSION} loading…`;
+{
+  const vs = document.getElementById('verstamp');
+  if (vs) vs.textContent = `v${VERSION} ✓`;
+}
 </script>
 
 <script>
