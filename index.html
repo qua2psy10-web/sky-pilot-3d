@@ -144,12 +144,9 @@
   </div>
 </div>
 
-<script type="importmap">
-{ "imports": { "three": "./lib/three.module.js" } }
-</script>
-
 <script type="module">
-import * as THREE from 'three';
+/* relative import (no importmap needed) so the game also runs on older iOS Safari (< 16.4) */
+import * as THREE from './lib/three.module.js';
 
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
@@ -1054,16 +1051,30 @@ window.__threeLoaded = true;   // set last: lets the fallback warn on any module
 </script>
 
 <script>
-/* CDN failure fallback (non-module so it runs even if the import fails) */
-setTimeout(function(){
-  if (!window.__threeLoaded){
-    var el = document.createElement('div');
-    el.style.cssText = 'color:#ff9a9a;font-size:13px;margin-top:14px;line-height:1.6';
-    el.textContent = '⚠️ 3Dライブラリ(lib/three.module.js)の読み込みに失敗しました。ファイルを確認してページを再読み込みしてください。';
+/* startup-failure fallback (non-module so it runs even if the game module dies) */
+(function(){
+  var warned = false;
+  function show(msg){
+    if (window.__threeLoaded || warned) return;
+    warned = true;
     var card = document.querySelector('.ov-card');
-    if (card) card.appendChild(el);
+    if (!card) return;
+    var el = document.createElement('div');
+    el.style.cssText = 'color:#ff9a9a;font-size:12.5px;margin-top:14px;line-height:1.7;white-space:pre-wrap';
+    el.textContent = msg;
+    card.appendChild(el);
   }
-}, 15000);
+  window.addEventListener('error', function(e){
+    if (e && e.message) show('⚠️ 起動に失敗しました：' + e.message + '\n（キャッシュが残っている場合はURL末尾に ?v=2 を付けて再アクセスしてください）');
+  }, true);
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e && e.reason;
+    show('⚠️ 起動に失敗しました：' + (r && r.message ? r.message : String(r)));
+  });
+  setTimeout(function(){
+    show('⚠️ 3Dライブラリの読み込みに失敗したようです。\nページを閉じて、URL末尾に ?v=2 を付けてもう一度開いてみてください。');
+  }, 15000);
+})();
 </script>
 </body>
 </html>
