@@ -136,10 +136,12 @@
     <div class="ov-title">🚁 スカイパイロット 3D</div>
     <div class="ov-sub">ブラウザで操縦するドローン・フライトシミュレーター</div>
     <ul class="ov-help">
-      <li>🕹️ <b>左スティック</b>：上下＝昇降、左右＝旋回</li>
+      <li>🚁 はじめるで<b>自動離陸</b>、その後はホバリング</li>
+      <li>🕹️ <b>左スティック</b>：上下＝高度、左右＝旋回</li>
       <li>🕹️ <b>右スティック</b>：上下＝前後、左右＝左右へ</li>
       <li>💛 ゴールドの<b>リング</b>をくぐってスコア（連続でコンボ）</li>
       <li>🔋 バッテリーが減ったら<b>着陸</b>して充電</li>
+      <li>🛬 着陸したいとき：ホバーOFF＋左スティック下</li>
       <li>🏢 建物にぶつけないよう注意！</li>
     </ul>
     <button id="ovBtn" class="primary">✈ はじめる</button>
@@ -160,7 +162,7 @@ const rand  = (a,b) => a + Math.random()*(b-a);
 const rad   = d => d*Math.PI/180;
 const norm360 = d => ((d%360)+360)%360;
 const TAU   = Math.PI * 2;
-const VERSION = 7;   // bump on each deploy — shown in #tel to verify which build is running
+const VERSION = 9;   // bump on each deploy — shown in #tel to verify which build is running
 
 /* ================= renderer / scene ================= */
 const gameEl = $('#game');
@@ -420,7 +422,7 @@ for(let i=0;i<10;i++){
 
 /* ================= drone ================= */
 const drone = {
-  pos: new THREE.Vector3(0, 0.5, 0),   // rest on the helipad until launch
+  pos: new THREE.Vector3(0, 0.45, 0),   // rest on the helipad until launch
   vel: new THREE.Vector3(),
   yaw: 0, pitch: 0, roll: 0,
   yawVel: 0, pitchVel: 0, rollVel: 0,
@@ -758,6 +760,7 @@ function toast(msg, ms = 1600){
 /* ================= game state ================= */
 let started = false, paused = false, hover = true, camMode = 'chase';
 let crashOverlayShown = false;
+let takeoffDone = false;
 let score = 0;
 let gt = 0;                     // game time (advances when not paused)
 let lowWarned = false, outWarnT = -1;
@@ -766,7 +769,8 @@ const G = 9.81, MAX_T = 26, DRAG_L = 0.55, DRAG_Q = 0.012;
 const MAX_ANGLE = rad(42);
 
 function doReset(recharge){
-  drone.pos.set(0, 6, 0);
+  drone.pos.set(0, 0.45, 0);
+  takeoffDone = false;
   drone.vel.set(0,0,0);
   drone.yaw = rand(0, TAU); drone.pitch = drone.roll = 0;
   drone.yawVel = drone.pitchVel = drone.rollVel = 0;
@@ -797,7 +801,12 @@ function updateGame(dt){
   if (drone.battery > 15) lowWarned = false;
   if (!drone.crashed){
     if (grounded){
-      drone.throttle += (0 - drone.throttle) * Math.min(1, dt*6);
+      if (!takeoffDone && hover && Math.abs(inp.ly) < 0.18 && drone.battery > 10){
+        // auto takeoff
+        drone.throttle += (0.7 - drone.throttle) * Math.min(1, dt*3);
+      } else {
+        drone.throttle += inp.ly * 0.95 * dt;
+      }
     } else if (hover && Math.abs(inp.ly) < 0.18){
       const target = clamp(0.42 + drone.vel.y * 0.08, 0, 1);
       drone.throttle += (target - drone.throttle) * Math.min(1, dt*3);
@@ -825,7 +834,8 @@ function updateGame(dt){
   drone.yawVel = THREE.MathUtils.damp(drone.yawVel, tYawRate, 6, dt);
   drone.yaw += drone.yawVel * dt;
 
-  droneEuler.set(drone.yaw, drone.pitch, drone.roll, 'YXZ');
+  /* Euler.set() args are always (x,y,z) — with order YXZ that means (pitch, yaw, roll) */
+  droneEuler.set(drone.pitch, drone.yaw, drone.roll, 'YXZ');
   droneQuat.setFromEuler(droneEuler);
   droneGroup.position.copy(drone.pos);
   droneGroup.quaternion.copy(droneQuat);
@@ -837,12 +847,20 @@ function updateGame(dt){
   const sp = drone.vel.length();
   drone.vel.multiplyScalar(Math.exp(-DRAG_L * dt));
   drone.vel.addScaledVector(drone.vel, -DRAG_Q * sp * dt);
+  if (window.__dbgPhysics && drone.grounded && !drone.crashed){
+    console.log(`[phys] vy=${drone.vel.y.toFixed(4)} up=(${_up.x.toFixed(2)},${_up.y.toFixed(3)},${_up.z.toFixed(2)}) thr=${drone.throttle.toFixed(3)} dt=${dt.toFixed(4)} yaw=${drone.yaw.toFixed(2)} pitch=${drone.pitch.toFixed(3)} roll=${drone.roll.toFixed(3)} e=(${droneEuler.x.toFixed(3)},${droneEuler.y.toFixed(3)},${droneEuler.z.toFixed(3)}) order=${droneEuler.order} q=(${droneQuat.x.toFixed(3)},${droneQuat.y.toFixed(3)},${droneQuat.z.toFixed(3)},${droneQuat.w.toFixed(3)})`);
+  }
   if (grounded){
     drone.pos.x += drone.vel.x*dt;
     drone.pos.z += drone.vel.z*dt;
-    const f = Math.exp(-2.5*dt);
-    drone.vel.x *= f; drone.vel.z *= f; drone.vel.y = 0;
-    drone.pos.y = drone.R;
+    if (drone.vel.y > 0.05){
+      // lifting off the pad
+      drone.pos.y += drone.vel.y*dt;
+    } else {
+      const f = Math.exp(-2.5*dt);
+      drone.vel.x *= f; drone.vel.z *= f; drone.vel.y = 0;
+      drone.pos.y = drone.R;
+    }
   } else {
     drone.pos.addScaledVector(drone.vel, dt);
   }
@@ -894,6 +912,9 @@ function updateGame(dt){
   drone.pos.x = clamp(drone.pos.x, -490, 490);
   drone.pos.z = clamp(drone.pos.z, -490, 490);
 
+  /* takeoff detection */
+  if (!takeoffDone && drone.pos.y > drone.R + 0.25) takeoffDone = true;
+
   /* battery */
   drone.battery = clamp(drone.battery - dt * (grounded ? -3 : 0.15 + drone.throttle * 1.7), 0, 100);
 
@@ -902,8 +923,8 @@ function updateGame(dt){
     drone.crashedT += dt;
     drone.throttle *= Math.exp(-3*dt);   // props wind down
     drone.tumble.multiplyScalar(Math.exp(-0.8*dt));
-    droneEuler.set(drone.yaw + drone.crashedT*drone.tumble.x,
-                       drone.pitch + drone.crashedT*drone.tumble.y,
+    droneEuler.set(drone.pitch + drone.crashedT*drone.tumble.y,
+                       drone.yaw + drone.crashedT*drone.tumble.x,
                        drone.roll + drone.crashedT*drone.tumble.z, 'YXZ');
     droneGroup.quaternion.setFromEuler(droneEuler);
     if (drone.crashedT > 1.4 && !crashOverlayShown){ crashOverlayShown = true; showOverlay('crash'); }
@@ -939,7 +960,7 @@ function updateCamera(dt, t){
     camPos.lerp(_v2, 1 - Math.exp(-18*dt));
     camQuat.slerp(droneQuat, 1 - Math.exp(-10*dt));
   } else {
-    const qy = new THREE.Quaternion().setFromEuler(new THREE.Euler(drone.yaw, 0, 0, 'YXZ'));
+    const qy = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, drone.yaw, 0, 'YXZ'));
     _v2.set(0, 2.6, 7.5).applyQuaternion(qy).add(drone.pos);
     const look = _v2.clone(); const f2 = new THREE.Vector3(0, 0.8, -1.5).applyQuaternion(qy).add(drone.pos);
     camPos.lerp(look, kPos);
@@ -984,10 +1005,12 @@ function showOverlay(mode){
       <div class="ov-title">🚁 スカイパイロット 3D</div>
       <div class="ov-sub">ブラウザで操縦するドローン・フライトシミュレーター</div>
       <ul class="ov-help">
-        <li>🕹️ <b>左スティック</b>：上下＝昇降、左右＝旋回</li>
+        <li>🚁 はじめるで<b>自動離陸</b>、その後はホバリング</li>
+        <li>🕹️ <b>左スティック</b>：上下＝高度、左右＝旋回</li>
         <li>🕹️ <b>右スティック</b>：上下＝前後、左右＝左右へ</li>
         <li>💛 ゴールドの<b>リング</b>をくぐってスコア（連続でコンボ）</li>
         <li>🔋 バッテリーが減ったら<b>着陸</b>して充電</li>
+        <li>🛬 着陸したいとき：ホバーOFF＋左スティック下</li>
         <li>🏢 建物にぶつけないよう注意！</li>
       </ul>
       <button id="ovBtn" class="primary">✈ はじめる</button>
@@ -1016,7 +1039,7 @@ function startGame(){
   doReset(false);
   drone.battery = 100;
   hideOverlay();
-  toast('GO!', 900);
+  toast('🚀 離陸! 左スティック上下＝昇降', 2500);
 }
 /* bind the initial static menu button (the same markup ships in the HTML) */
 {
@@ -1105,6 +1128,7 @@ function loop(now){
 }
 requestAnimationFrame(loop);
 window.__threeLoaded = true;   // set last: lets the fallback warn on any module-load failure
+window.__drone = drone; window.__AudioSys = AudioSys;   // debug handles
 if (telEl) telEl.textContent = `v${VERSION} loading…`;
 {
   const vs = document.getElementById('verstamp');
